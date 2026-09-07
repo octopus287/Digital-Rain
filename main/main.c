@@ -13,7 +13,7 @@
  *
  * 阶段3：5x7 点阵字体 + 文字渲染，显示 "Wake up, Neo..."
  * 阶段4：代码雨动画（10列 ASCII 数字雨，15FPS 全帧重绘）
- * 阶段5：彩蛋循环（开场文字 + 每约15s 定格弹出 "Wake up, Neo..." 2s）
+ * 阶段5：彩蛋循环（开场 + 每15s 定格，"Wake up, Neo..." 打字机式逐字弹出）
  * ============================================================ */
 #include <stdio.h>
 #include <string.h>
@@ -154,15 +154,27 @@ static void rain_respawn(int c, bool first)
     drops[c].wait = first ? 0 : (esp_random() % 24);            /* 重生等 0~1.5s */
 }
 
-/* ---------------- 阶段5：彩蛋循环 ---------------- */
+/* ---------------- 阶段5：彩蛋循环（打字机效果） ---------------- */
 #define EGG_PERIOD_FRAMES  225    /* 约15s @15FPS（含刷屏耗时实际约20s） */
-#define EGG_SHOW_FRAMES    30     /* 显示 2s @15FPS */
+#define EGG_TYPE_FRAMES    2      /* 每2帧出现1个字符，约7.5字/秒 */
+#define EGG_HOLD_FRAMES    30     /* 打完后停留 2s */
+#define EGG_CHARS          14     /* "Wake up,"(8) + "Neo..."(6) */
+#define EGG_TOTAL_FRAMES   (EGG_CHARS * EGG_TYPE_FRAMES + EGG_HOLD_FRAMES)
 
-static void egg_show(void)
+/* 逐字绘制彩蛋文字：reveal = 已显示的字符数(0~14)，两行接力 */
+static void egg_draw(int reveal)
 {
+    static const char l1[] = "Wake up,";
+    static const char l2[] = "Neo...";
+    const int len1  = (int)(sizeof(l1) - 1);
+    const int total = len1 + (int)(sizeof(l2) - 1);
+    if (reveal > total) reveal = total;
+    int n1 = reveal < len1 ? reveal : len1;
+    int n2 = reveal - n1;
+
     memset(vfb, 0, sizeof(vfb));
-    vfb_str(8,  12, "Wake up,");            /* 宽 48px -> x 8~55 */
-    vfb_str(14, 24, "Neo...");              /* 宽 36px -> x 14~49 */
+    for (int i = 0; i < n1; i++) vfb_char(8 + i * 6, 12, l1[i]);
+    for (int i = 0; i < n2; i++) vfb_char(14 + i * 6, 24, l2[i]);
     ESP_ERROR_CHECK(vfb_flush());
 }
 
@@ -240,18 +252,21 @@ void app_main(void)
     ESP_LOGI(TAG, "OLED 就绪");
 
     /* 4. 阶段5：代码雨 + 彩蛋循环
-     *    开场先弹 "Wake up, Neo..." 2s（电影式开场），随后开始下雨；
-     *    之后每隔 EGG_PERIOD_FRAMES 帧定格弹出彩蛋 EGG_SHOW_FRAMES 帧。
+     *    开场打字机式弹出 "Wake up, Neo..."（每2帧1字符），随后开始下雨；
+     *    之后每隔 EGG_PERIOD_FRAMES 帧定格，再次逐字弹出彩蛋。
      *    彩蛋期间雨滴状态冻结，恢复后从原位继续。 */
     for (int c = 0; c < NCOLS; c++) rain_respawn(c, true);
-    int egg_timer = EGG_SHOW_FRAMES;
+    int egg_frames = EGG_TOTAL_FRAMES;
     bool egg_on = true;
-    egg_show();
+    int egg_timer = EGG_PERIOD_FRAMES;
     ESP_LOGI(TAG, "Wake up, Neo... -> 代码雨启动 @%dFPS", RAIN_FPS);
 
     while (1) {
         if (egg_on) {
-            if (--egg_timer <= 0) {          /* 彩蛋结束，恢复下雨 */
+            /* 打字机：由剩余帧数推算已显示字符数，逐帧重绘 */
+            int shown = (EGG_TOTAL_FRAMES - egg_frames) / EGG_TYPE_FRAMES + 1;
+            egg_draw(shown);
+            if (--egg_frames <= 0) {         /* 彩蛋结束，恢复下雨 */
                 egg_on = false;
                 egg_timer = EGG_PERIOD_FRAMES;
             }
@@ -289,10 +304,9 @@ void app_main(void)
         }
         ESP_ERROR_CHECK(vfb_flush());
 
-        if (--egg_timer <= 0) {              /* 该弹彩蛋了 */
+        if (--egg_timer <= 0) {              /* 该弹彩蛋了：定格，逐字打出 */
             egg_on = true;
-            egg_timer = EGG_SHOW_FRAMES;
-            egg_show();
+            egg_frames = EGG_TOTAL_FRAMES;
         }
 
         vTaskDelay(pdMS_TO_TICKS(1000 / RAIN_FPS));
