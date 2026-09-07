@@ -12,7 +12,7 @@
  *   - POR 默认 entire-on，init 后必须补发 0xA4/0xA6
  *
  * 阶段3：5x7 点阵字体 + 文字渲染，显示 "Wake up, Neo..."
- * 阶段4：代码雨动画（10列 ASCII 数字雨，15FPS 全帧重绘）
+ * 阶段4：代码雨动画（10列片假名雨，37 字形 5x7 字库，15FPS 全帧重绘）
  * 阶段5：彩蛋循环（开场 + 每15s 定格，"Wake up, Neo..." 打字机式逐字弹出）
  * ============================================================ */
 #include <stdio.h>
@@ -89,6 +89,31 @@ static const uint8_t font5x7[95][5] = {
     {0x00,0x41,0x36,0x08,0x00}, {0x08,0x08,0x2A,0x1C,0x08},
 };
 
+/* ---------------- 片假名 5x7 字库（37 个，格式同上：列字节，bit0=顶行） ----------------
+ * 手工设计的简化字形，用于代码雨（黑客帝国原片的半角片假名质感） */
+static const uint8_t kata[][5] = {
+    /*ア*/ {0x61,0x19,0x07,0x09,0x09}, /*イ*/ {0x00,0x60,0x1E,0x01,0x00},
+    /*ウ*/ {0x01,0x61,0x1D,0x03,0x01}, /*エ*/ {0x41,0x41,0x5D,0x41,0x41},
+    /*オ*/ {0x41,0x31,0x0F,0x01,0x01}, /*カ*/ {0x41,0x31,0x0F,0x09,0x09},
+    /*キ*/ {0x12,0x12,0x7F,0x12,0x12}, /*ク*/ {0x00,0x61,0x19,0x07,0x03},
+    /*コ*/ {0x41,0x41,0x41,0x41,0x7F}, /*サ*/ {0x08,0x7F,0x08,0x7F,0x08},
+    /*シ*/ {0x3C,0x60,0x40,0x42,0x41}, /*ス*/ {0x61,0x1F,0x07,0x19,0x21},
+    /*セ*/ {0x09,0x69,0x1F,0x09,0x09}, /*ソ*/ {0x1C,0x32,0x22,0x21,0x20},
+    /*タ*/ {0x70,0x09,0x09,0x0D,0x03}, /*チ*/ {0x08,0x78,0x0F,0x0A,0x0A},
+    /*ツ*/ {0x30,0x40,0x40,0x46,0x41}, /*テ*/ {0x08,0x39,0x0F,0x09,0x09},
+    /*ト*/ {0x40,0x30,0x10,0x7F,0x00}, /*ニ*/ {0x24,0x24,0x24,0x24,0x24},
+    /*ノ*/ {0x40,0x30,0x0C,0x03,0x01}, /*ハ*/ {0x07,0x18,0x60,0x1C,0x03},
+    /*ヒ*/ {0x1F,0x10,0x1E,0x3E,0x10}, /*フ*/ {0x01,0x01,0x61,0x19,0x07},
+    /*ヘ*/ {0x10,0x08,0x04,0x0A,0x02}, /*ホ*/ {0x41,0x31,0x7F,0x31,0x41},
+    /*ミ*/ {0x24,0x12,0x12,0x12,0x09}, /*ム*/ {0x41,0x36,0x09,0x06,0x01},
+    /*メ*/ {0x21,0x12,0x0C,0x12,0x21}, /*モ*/ {0x68,0x68,0x1F,0x05,0x05},
+    /*ヨ*/ {0x49,0x49,0x49,0x49,0x7F}, /*ラ*/ {0x60,0x41,0x41,0x41,0x7F},
+    /*リ*/ {0x3E,0x00,0x01,0x7E,0x00}, /*ル*/ {0x3F,0x40,0x30,0x0C,0x03},
+    /*ロ*/ {0x7F,0x41,0x41,0x41,0x7F}, /*ワ*/ {0x7F,0x41,0x01,0x3F,0x3F},
+    /*ン*/ {0x40,0x30,0x09,0x06,0x01},
+};
+#define KATA_NUM  (sizeof(kata) / sizeof(kata[0]))
+
 /* ---------------- 竖屏绘制 API ----------------
  * 实测（文字方向校准）：屏幕为横装
  *   物理横向 x(0~63) = SEG 方向 -> 列地址 SEG_BASE+x
@@ -104,15 +129,20 @@ static inline void vfb_px(int x, int y, int on)
     else    *b &= ~(1 << (y % 8));
 }
 
-/* 画一个 5x7 字符，返回步进宽度 6 */
-static int vfb_char(int x, int y, char ch)
+/* 画一个 5x7 字形（5 个列字节，bit0=顶行），返回步进宽度 6 */
+static int vfb_glyph(int x, int y, const uint8_t *f)
 {
-    if (ch < 0x20 || ch > 0x7E) ch = '?';
-    const uint8_t *f = font5x7[ch - 0x20];
     for (int c = 0; c < 5; c++)
         for (int r = 0; r < 7; r++)
             vfb_px(x + c, y + r, (f[c] >> r) & 1);
     return 6;
+}
+
+/* 画一个 5x7 ASCII 字符 */
+static int vfb_char(int x, int y, char ch)
+{
+    if (ch < 0x20 || ch > 0x7E) ch = '?';
+    return vfb_glyph(x, y, font5x7[ch - 0x20]);
 }
 
 __attribute__((unused)) static int vfb_str(int x, int y, const char *s)
@@ -136,13 +166,12 @@ typedef struct {
     uint8_t wait;   /* 重生等待帧数 */
 } drop_t;
 static drop_t drops[NCOLS];
-static char   gchars[NCOLS][NROWS];   /* 每列各屏幕行当前字符 */
+static uint8_t gchars[NCOLS][NROWS];  /* 每列各屏幕行的字形下标(片假名) */
 
-/* 片假名暂无字库，用 数字/大写字母/符号 池代替 */
-static char rain_char(void)
+/* 随机取一个片假名字形下标 */
+static uint8_t rain_glyph(void)
 {
-    static const char pool[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ<>+=*!?:";
-    return pool[esp_random() % (sizeof(pool) - 1)];
+    return (uint8_t)(esp_random() % KATA_NUM);
 }
 
 static void rain_respawn(int c, bool first)
@@ -285,22 +314,22 @@ void app_main(void)
                 d->cnt = 0;
                 d->head++;
                 if (d->head >= 0 && d->head < NROWS)
-                    gchars[c][d->head] = rain_char();
+                    gchars[c][d->head] = rain_glyph();
                 if (d->head - d->len >= NROWS) {  /* 尾迹完全离屏 -> 重生 */
                     rain_respawn(c, false);
                     continue;
                 }
             }
 
-            /* 绘制该列：尾迹内字符保持稳定，形成连贯雨丝 */
+            /* 绘制该列：尾迹内字形保持稳定，形成连贯雨丝 */
             int r0 = d->head - d->len + 1; if (r0 < 0)     r0 = 0;
             int r1 = d->head;              if (r1 >= NROWS) r1 = NROWS - 1;
             for (int r = r0; r <= r1; r++)
-                vfb_char(c * COL_PITCH, r * GLYPH_H, gchars[c][r]);
+                vfb_glyph(c * COL_PITCH, r * GLYPH_H, kata[gchars[c][r]]);
 
-            /* 闪烁：小概率随机改写一个字符 */
+            /* 闪烁：小概率随机改写一个字形 */
             if ((esp_random() & 7) == 0)
-                gchars[c][esp_random() % NROWS] = rain_char();
+                gchars[c][esp_random() % NROWS] = rain_glyph();
         }
         ESP_ERROR_CHECK(vfb_flush());
 
