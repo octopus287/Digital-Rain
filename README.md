@@ -5,7 +5,9 @@ English | [中文](#中文说明)
 A Matrix-style **"digital rain"** running on an ESP32-C3 and a tiny 0.42-inch OLED —
 inspired by Daniel Idle's *Digital Rain Ring*.
 
-![Wake up, Neo... on the 0.42" OLED](docs/demo.jpg)
+<p align="center">
+  <img src="docs/demo.jpg" alt="Wake up, Neo... on the 0.42&quot; OLED" width="300">
+</p>
 
 ## What it does
 
