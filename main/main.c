@@ -1,19 +1,29 @@
 /* ============================================================
- * Digital Rain Ring —— 黑客帝国代码雨戒指
- * 硬件：ESP32-C3 + 0.42寸 SSD1306 OLED (I2C 单色)
+ * Digital Rain Ring —— 黑客帝国"代码雨"戒指
+ * Matrix-style "digital rain" on a tiny OLED ring display
  *
- * ★ 屏幕实测参数（阶段2/3标定结论，勿动）★
- *   - 探测：SDA=GPIO5, SCL=GPIO6, 地址=0x3C
- *   - 玻璃：72x40 可视窗口，横装
- *     物理横向 x(0~63) = SEG 方向, 基准 SEG_BASE=32
- *     物理纵向 y(0~39) = 页(COM)方向：页0在最顶, 页内bit0朝顶, 向下递增
- *     （页标定照片：顶=页0条纹 -> 黑 -> 亮(页2) -> 黑 -> 亮(页4)，页5~7不可见；
- *       但玻璃底部边窗像素会显示页5~7内容，故页5~7必须恒黑压住）
- *   - POR 默认 entire-on，init 后必须补发 0xA4/0xA6
+ * 硬件 Hardware : ESP32-C3 开发板 + 0.42 寸 SSD1306 OLED (I2C 接口, 单色)
  *
- * 阶段3：5x7 点阵字体 + 文字渲染，显示 "Wake up, Neo..."
- * 阶段4：代码雨动画（10列片假名雨，37 字形 5x7 字库，15FPS 全帧重绘）
- * 阶段5：彩蛋循环（开场 + 每15s 定格，"Wake up, Neo..." 打字机式逐字弹出）
+ * 效果 Effect  :
+ *   1. 代码雨: 10 列片假名字符不断从屏幕顶部落下(电影里的经典画面)
+ *   2. 彩蛋  : 开场像打字机一样逐字打出 "Wake up, Neo...",
+ *              之后每隔约 20 秒暂停下雨、重演一次
+ *
+ * 怎么跑起来 How to run:
+ *   1. 安装 ESP-IDF v5.5, 进入本目录
+ *   2. idf.py set-target esp32c3      (首次编译前指定芯片)
+ *   3. idf.py build flash monitor     (编译、烧录、看日志一条龙)
+ *
+ * 屏幕会自动探测: 程序会挨个尝试常见的 I2C 引脚组合和地址,
+ * 不用改代码就能适配大多数接线方式。
+ * (这块板子实测为 SDA=GPIO5, SCL=GPIO6, 地址=0x3C)
+ *
+ * ★ 这块 0.42 寸小屏的两个特殊性(换其他屏时务必重新确认) ★
+ *   1. 显存和屏幕方向是"横竖互换"的: 驱动芯片显存的"页"方向
+ *      对应屏幕的竖直方向。可视区域只有 40 像素高(显存页 0~4),
+ *      水平方向用显存第 32~95 列(SEG_BASE=32)。
+ *   2. 玻璃边缘有一排"隐形像素"连着显存页 5~7: 往这几页写东西
+ *      会在屏幕底部显示出来。所以程序始终把页 5~7 保持全黑。
  * ============================================================ */
 #include <stdio.h>
 #include <string.h>
@@ -29,7 +39,7 @@
 
 static const char *TAG = "matrix_rain";
 
-/* ---------------- I2C 探测参数 ---------------- */
+/* ---------------- 自动探测 OLED: 挨个尝试这些 引脚组合 和 I2C 地址 ---------------- */
 static const int pin_pairs[][2] = {
     {5, 6}, {4, 5}, {6, 7}, {2, 3}, {3, 2},
     {8, 9}, {9, 10}, {0, 1}, {1, 0}, {7, 6},
@@ -42,18 +52,23 @@ static i2c_master_bus_handle_t s_bus = NULL;
 static esp_lcd_panel_io_handle_t s_io = NULL;
 static esp_lcd_panel_handle_t s_panel = NULL;
 
-/* ---------------- 竖屏帧缓冲（按 GDDRAM 原始布局） ---------------- */
-#define SEG_BASE    32
+/* ---------------- 显存缓冲区 ----------------
+ * SSD1306 驱动芯片把显存分成 8 个"页", 每页 8 像素高、128 像素宽。
+ * vfb[页][列] 是整块显存的镜像: 先在这里画好, 再用 vfb_flush()
+ * 一次性刷到屏幕。这块 0.42 寸屏只显示其中一小块, 偏移见 SEG_BASE */
+#define SEG_BASE    32          /* 屏幕最左边一列对应显存的第 32 列 */
 #define SCREEN_W    64
 #define SCREEN_H    64
-static uint8_t vfb[8][128];     /* [页][SEG列] */
+static uint8_t vfb[8][128];     /* [页][列] */
 
+/* 把整块显存一次性刷到屏幕 */
 static esp_err_t vfb_flush(void)
 {
     return esp_lcd_panel_draw_bitmap(s_panel, 0, 0, 128, 64, vfb);
 }
 
-/* ---------------- 5x7 字体（0x20~0x7E，bit0=字符顶行） ---------------- */
+/* ---------------- ASCII 5x7 点阵字库 (0x20~0x7E) ----------------
+ * 每个字符 5 个字节, 每个字节是一列像素: bit0 是最顶上一行 */
 static const uint8_t font5x7[95][5] = {
     {0x00,0x00,0x00,0x00,0x00}, {0x00,0x00,0x5F,0x00,0x00}, {0x00,0x07,0x00,0x07,0x00},
     {0x14,0x7F,0x14,0x7F,0x14}, {0x24,0x2A,0x7F,0x2A,0x12}, {0x23,0x13,0x08,0x64,0x62},
@@ -89,8 +104,8 @@ static const uint8_t font5x7[95][5] = {
     {0x00,0x41,0x36,0x08,0x00}, {0x08,0x08,0x2A,0x1C,0x08},
 };
 
-/* ---------------- 片假名 5x7 字库（37 个，格式同上：列字节，bit0=顶行） ----------------
- * 手工设计的简化字形，用于代码雨（黑客帝国原片的半角片假名质感） */
+/* ---------------- 片假名 5x7 点阵字库 (37 个字形, 格式同上面的 ASCII 字库) ----------------
+ * 手工简化的片假名字形, 专门给代码雨用 —— 电影原片里落的就是这类字符 */
 static const uint8_t kata[][5] = {
     /*ア*/ {0x61,0x19,0x07,0x09,0x09}, /*イ*/ {0x00,0x60,0x1E,0x01,0x00},
     /*ウ*/ {0x01,0x61,0x1D,0x03,0x01}, /*エ*/ {0x41,0x41,0x5D,0x41,0x41},
@@ -114,13 +129,13 @@ static const uint8_t kata[][5] = {
 };
 #define KATA_NUM  (sizeof(kata) / sizeof(kata[0]))
 
-/* ---------------- 竖屏绘制 API ----------------
- * 实测（文字方向校准）：屏幕为横装
- *   物理横向 x(0~63) = SEG 方向 -> 列地址 SEG_BASE+x
- *   物理纵向 y(0~63) = 页(COM)方向 -> 页 y/8, 页内bit y%8
- * ★ 玻璃底部有一条"边窗像素"连到页5~7区域，写入即显示，
- *   因此内容限制在 DRAW_H=40（页0~4），页5~7恒黑压住边窗 */
-#define DRAW_H  40
+/* ---------------- 画点 / 画字 API ----------------
+ * 这块屏"存数据是横的、看屏幕是竖的": 显存的页方向对应屏幕的
+ * 竖直方向 y(0~39), 显存的列方向对应屏幕的水平方向 x(0~63)。
+ * vfb_px() 负责把 (x,y) 换算成显存里的一个比特。
+ * 越界的点一律不画 —— 这样显存页 5~7 永远全黑,
+ * 压住玻璃边缘那排会漏出来的"隐形像素" */
+#define DRAW_H  40              /* 屏幕实际可见高度: 40 像素 */
 static inline void vfb_px(int x, int y, int on)
 {
     if (x < 0 || x >= SCREEN_W || y < 0 || y >= DRAW_H) return;
@@ -129,7 +144,7 @@ static inline void vfb_px(int x, int y, int on)
     else    *b &= ~(1 << (y % 8));
 }
 
-/* 画一个 5x7 字形（5 个列字节，bit0=顶行），返回步进宽度 6 */
+/* 画一个 5x7 字形(传入字库里的 5 个列字节), 返回步进宽度 6 */
 static int vfb_glyph(int x, int y, const uint8_t *f)
 {
     for (int c = 0; c < 5; c++)
@@ -151,22 +166,22 @@ __attribute__((unused)) static int vfb_str(int x, int y, const char *s)
     return x;   /* 返回结束坐标，便于计算宽度 */
 }
 
-/* ---------------- 阶段4：代码雨参数 ---------------- */
-#define RAIN_FPS    15        /* 目标帧率（约定 15~25FPS） */
-#define NCOLS       10        /* 10列 x 6px = 60px，左右各留 2px */
-#define COL_PITCH   6
-#define GLYPH_H     8         /* 7px 字形 + 1px 行距 */
-#define NROWS       5         /* 40px / 8px = 5 行字形 */
+/* ---------------- 代码雨参数 ---------------- */
+#define RAIN_FPS    15        /* 动画帧率: 越大越流畅, 也越耗电 */
+#define NCOLS       10        /* 雨的列数: 10 列 x 6 像素 = 60, 屏宽 64 刚好放下 */
+#define COL_PITCH   6         /* 列间距(像素) = 字宽 5 + 空隙 1 */
+#define GLYPH_H     8         /* 行高(像素) = 字高 7 + 空隙 1 */
+#define NROWS       5         /* 竖直方向能放 40/8 = 5 行字符 */
 
 typedef struct {
-    int8_t  head;   /* 头部字形行号，可为负(尚未入屏) */
-    int8_t  len;    /* 尾迹长度(行) */
-    uint8_t spd;    /* 每几帧前进一行 */
-    uint8_t cnt;    /* 帧计数 */
-    uint8_t wait;   /* 重生等待帧数 */
+    int8_t  head;   /* 雨滴"头"所在的字符行, 小于 0 表示还没落进屏幕 */
+    int8_t  len;    /* 尾迹长度(几个字符行) */
+    uint8_t spd;    /* 每隔几帧往下走一行(越小落得越快) */
+    uint8_t cnt;    /* 帧计数器(配合 spd 用) */
+    uint8_t wait;   /* 重生前等待的帧数 */
 } drop_t;
 static drop_t drops[NCOLS];
-static uint8_t gchars[NCOLS][NROWS];  /* 每列各屏幕行的字形下标(片假名) */
+static uint8_t gchars[NCOLS][NROWS];  /* 每列每一行当前显示的片假名下标 */
 
 /* 随机取一个片假名字形下标 */
 static uint8_t rain_glyph(void)
@@ -174,6 +189,7 @@ static uint8_t rain_glyph(void)
     return (uint8_t)(esp_random() % KATA_NUM);
 }
 
+/* 生成一颗新雨滴: 随机起点、尾迹长度、速度; first=开机时的初始铺排 */
 static void rain_respawn(int c, bool first)
 {
     drops[c].head = -(int8_t)(esp_random() % (first ? 12 : 6)); /* 顶部随机错开 */
@@ -183,14 +199,14 @@ static void rain_respawn(int c, bool first)
     drops[c].wait = first ? 0 : (esp_random() % 24);            /* 重生等 0~1.5s */
 }
 
-/* ---------------- 阶段5：彩蛋循环（打字机效果） ---------------- */
-#define EGG_PERIOD_FRAMES  225    /* 约15s @15FPS（含刷屏耗时实际约20s） */
-#define EGG_TYPE_FRAMES    2      /* 每2帧出现1个字符，约7.5字/秒 */
-#define EGG_HOLD_FRAMES    30     /* 打完后停留 2s */
-#define EGG_CHARS          14     /* "Wake up,"(8) + "Neo..."(6) */
+/* ---------------- 彩蛋: 打字机式打出 "Wake up, Neo..." ---------------- */
+#define EGG_PERIOD_FRAMES  225    /* 每隔多少帧弹一次彩蛋(15FPS 下约 20 秒) */
+#define EGG_TYPE_FRAMES    2      /* 出一个字后停几帧再出下一个(越小打字越快) */
+#define EGG_HOLD_FRAMES    30     /* 全部打完后停留几帧(30 帧 = 2 秒) */
+#define EGG_CHARS          14     /* 两行文字的总字符数 */
 #define EGG_TOTAL_FRAMES   (EGG_CHARS * EGG_TYPE_FRAMES + EGG_HOLD_FRAMES)
 
-/* 逐字绘制彩蛋文字：reveal = 已显示的字符数(0~14)，两行接力 */
+/* 按打字机进度绘制: reveal = 目前已显示的字符数, 第一行打完接着打第二行 */
 static void egg_draw(int reveal)
 {
     static const char l1[] = "Wake up,";
@@ -207,7 +223,7 @@ static void egg_draw(int reveal)
     ESP_ERROR_CHECK(vfb_flush());
 }
 
-/* ---------------- I2C 探测 ---------------- */
+/* ---------------- 自动探测 OLED: 试出屏幕接在哪组引脚、用什么地址 ---------------- */
 static bool probe_oled(uint8_t *ret_addr, int *ret_sda, int *ret_scl)
 {
     for (int p = 0; p < PIN_PAIR_NUM; p++) {
@@ -241,15 +257,15 @@ static bool probe_oled(uint8_t *ret_addr, int *ret_sda, int *ret_scl)
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "=== Digital Rain Ring · 阶段3：文字渲染 ===");
+    ESP_LOGI(TAG, "=== Digital Rain Ring · Matrix code rain ===");
 
-    /* 1. 探测板载 OLED */
+    /* 1. 自动探测 OLED 接在哪 */
     uint8_t addr;
     int sda, scl;
     ESP_ERROR_CHECK(probe_oled(&addr, &sda, &scl) ? ESP_OK : ESP_FAIL);
-    ESP_LOGI(TAG, "探测成功: SDA=%d SCL=%d 地址=0x%02X", sda, scl, addr);
+    ESP_LOGI(TAG, "找到 OLED: SDA=%d SCL=%d 地址=0x%02X", sda, scl, addr);
 
-    /* 2. 挂载 SSD1306 面板设备 */
+    /* 2. 初始化 SSD1306 屏幕驱动(用 ESP-IDF 自带的驱动) */
     esp_lcd_panel_io_i2c_config_t io_cfg = {
         .dev_addr = addr,
         .control_phase_bytes = 1,
@@ -270,20 +286,22 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_lcd_panel_reset(s_panel));
     ESP_ERROR_CHECK(esp_lcd_panel_init(s_panel));
 
-    /* 3. 校准命令（内置驱动不覆盖这块屏的差异） */
-    esp_lcd_panel_io_tx_param(s_io, 0xDA, (uint8_t[]){0x12}, 1);  /* alt COM 引脚 */
-    esp_lcd_panel_io_tx_param(s_io, 0xA4, NULL, 0);               /* 关键：恢复显存显示 */
-    esp_lcd_panel_io_tx_param(s_io, 0xA6, NULL, 0);               /* 正常（非反色） */
+    /* 3. 补发几条屏幕校准命令(通用驱动没照顾到这块屏的差异):
+     *    0xDA 指定引脚排布; 0xA4 显示显存内容(而不是整屏全亮);
+     *    0xA6 正常黑底白字(不反色) */
+    esp_lcd_panel_io_tx_param(s_io, 0xDA, (uint8_t[]){0x12}, 1);
+    esp_lcd_panel_io_tx_param(s_io, 0xA4, NULL, 0);
+    esp_lcd_panel_io_tx_param(s_io, 0xA6, NULL, 0);
     ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(s_panel, true));
 
     memset(vfb, 0, sizeof(vfb));
     ESP_ERROR_CHECK(vfb_flush());
     ESP_LOGI(TAG, "OLED 就绪");
 
-    /* 4. 阶段5：代码雨 + 彩蛋循环
-     *    开场打字机式弹出 "Wake up, Neo..."（每2帧1字符），随后开始下雨；
-     *    之后每隔 EGG_PERIOD_FRAMES 帧定格，再次逐字弹出彩蛋。
-     *    彩蛋期间雨滴状态冻结，恢复后从原位继续。 */
+    /* 4. 主循环: 代码雨 + 彩蛋循环
+     *    开机先打字机式打出 "Wake up, Neo...", 然后开始下雨;
+     *    之后每隔一段时间暂停下雨、再打一遍彩蛋, 如此往复。
+     *    彩蛋期间雨滴的位置被冻结, 彩蛋结束后从原处继续下 */
     for (int c = 0; c < NCOLS; c++) rain_respawn(c, true);
     int egg_frames = EGG_TOTAL_FRAMES;
     bool egg_on = true;
@@ -292,10 +310,10 @@ void app_main(void)
 
     while (1) {
         if (egg_on) {
-            /* 打字机：由剩余帧数推算已显示字符数，逐帧重绘 */
+            /* 打字机进行中: 根据已过帧数算出该显示几个字, 每帧重绘 */
             int shown = (EGG_TOTAL_FRAMES - egg_frames) / EGG_TYPE_FRAMES + 1;
             egg_draw(shown);
-            if (--egg_frames <= 0) {         /* 彩蛋结束，恢复下雨 */
+            if (--egg_frames <= 0) {         /* 打完并停留完毕, 恢复下雨 */
                 egg_on = false;
                 egg_timer = EGG_PERIOD_FRAMES;
             }
@@ -309,31 +327,31 @@ void app_main(void)
             drop_t *d = &drops[c];
             if (d->wait) { d->wait--; continue; }
 
-            /* 前进：每 spd 帧走一个字形行，进入新行时取一个随机字符 */
+            /* 往下走: 每 spd 帧走一行, 头部进入新行时换一个随机片假名 */
             if (++d->cnt >= d->spd) {
                 d->cnt = 0;
                 d->head++;
                 if (d->head >= 0 && d->head < NROWS)
                     gchars[c][d->head] = rain_glyph();
-                if (d->head - d->len >= NROWS) {  /* 尾迹完全离屏 -> 重生 */
+                if (d->head - d->len >= NROWS) {  /* 整条雨丝落出屏幕, 重新生成 */
                     rain_respawn(c, false);
                     continue;
                 }
             }
 
-            /* 绘制该列：尾迹内字形保持稳定，形成连贯雨丝 */
+            /* 画出这一列: 头部 + 尾迹(尾迹字形保持不变, 才像连贯的雨丝) */
             int r0 = d->head - d->len + 1; if (r0 < 0)     r0 = 0;
             int r1 = d->head;              if (r1 >= NROWS) r1 = NROWS - 1;
             for (int r = r0; r <= r1; r++)
                 vfb_glyph(c * COL_PITCH, r * GLYPH_H, kata[gchars[c][r]]);
 
-            /* 闪烁：小概率随机改写一个字形 */
+            /* 偶尔随机改写一个字形, 制造雨中"字符闪烁"的效果 */
             if ((esp_random() & 7) == 0)
                 gchars[c][esp_random() % NROWS] = rain_glyph();
         }
         ESP_ERROR_CHECK(vfb_flush());
 
-        if (--egg_timer <= 0) {              /* 该弹彩蛋了：定格，逐字打出 */
+        if (--egg_timer <= 0) {              /* 到点了: 定格下雨, 开始打彩蛋 */
             egg_on = true;
             egg_frames = EGG_TOTAL_FRAMES;
         }
