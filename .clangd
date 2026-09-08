@@ -1,2 +1,6 @@
 CompileFlags:
     Remove: [-f*, -m*]
+
+# 让 clangd 直接使用 idf.py 生成的编译数据库（build/compile_commands.json），
+# 否则它找不到 RISC-V 工具链的标准头文件（如 stdio.h），会报假红波浪
+CompilationDatabase: build
